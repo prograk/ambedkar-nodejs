@@ -7,7 +7,6 @@ import { pipeline, env } from '@xenova/transformers';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
-import { parse } from 'path';
 
 config();
 
@@ -390,10 +389,10 @@ class VectorService {
 }
 
 class AIService {
-  static async generateResponse(query) {
+  static async generateResponse(query, historyContext = '') {
     try {
       // Search for relevant content
-      const searchResults = await VectorService.searchSimilar(query, 10);
+      const searchResults = await VectorService.searchSimilar(query, 15);
       
       if (searchResults.length === 0) {
         return {
@@ -439,16 +438,15 @@ Respond with JSON in this exact format:
 
 CRITICAL: Output ONLY valid JSON. No other text or formatting.`;
 
-//       const userPrompt = `DOCUMENT EXCERPTS:
-// ${documentContext}
 
-// ${historyContext}
+const userPrompt = `DOCUMENT EXCERPTS:
+${context}
 
-// USER QUESTION: ${userQuestion}
+${historyContext}
 
-// Please analyze the excerpts and respond with the JSON format specified.`;
+USER QUESTION: ${query}
 
-      const userPrompt = `DOCUMENT CONTEXT:\n${context}\n\nQUESTION: ${query}`;
+Please analyze the excerpts and respond with the JSON format specified.`;
       
       // Call OpenRouter API
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -460,7 +458,7 @@ CRITICAL: Output ONLY valid JSON. No other text or formatting.`;
           'X-Title': 'Document Chat API',
         },
         body: JSON.stringify({
-          model: process.env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet',
+          model: process.env.OPENROUTER_MODEL,
           messages: [
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userPrompt }
@@ -594,13 +592,13 @@ app.delete('/api/documents/:id', async (req, res) => {
 // Chat endpoint
 app.post('/api/chat', async (req, res) => {
   try {
-    const { query } = req.body;
+    const { query, historyContext = '' } = req.body;
     
     if (!query) {
       return res.status(400).json({ error: 'Query is required' });
     }
     
-    const response = await AIService.generateResponse(query);
+    const response = await AIService.generateResponse(query, historyContext);
     res.json(response);
   } catch (error) {
     console.error('Chat failed:', error);
