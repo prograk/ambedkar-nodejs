@@ -1,0 +1,37 @@
+{
+  "name": "pdf-chatbot-server",
+  "version": "1.0.0",
+  "description": "Backend server for PDF chatbot with Qdrant vector database",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "nodemon index.js",
+    "dev": "nodemon index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "pdf",
+    "chatbot",
+    "qdrant",
+    "vector-database",
+    "embeddings",
+    "ai"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@langchain/textsplitters": "^0.0.3",
+    "@qdrant/js-client-rest": "^1.8.2",
+    "@xenova/transformers": "^2.17.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
