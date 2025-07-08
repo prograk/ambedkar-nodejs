@@ -11,7 +11,7 @@ import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 3001;
 
 // Configure multer for file uploads
 const upload = multer({ 
@@ -619,7 +619,7 @@ const startServer = async () => {
     
     await initializeServices();
     
-    app.listen(PORT, () => {
+    app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Server running on port ${PORT}`);
     });
   } catch (error) {
