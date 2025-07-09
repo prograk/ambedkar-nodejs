@@ -536,12 +536,19 @@ app.post('/api/initialize', async (req, res) => {
 app.get('/api/config', async (req, res) => {
   try {
     await new Promise((resolve) => setTimeout(resolve(), 300))
-    res.json({ success: true, config: {
-      isUploadEnabled: false
-    }});
+    res.json({ 
+      success: true, 
+      config: {
+        isUploadEnabled: false
+      }
+    });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
+});
+
+app.get('/api/ping', (req, res) => {
+  res.json({ success: true, status: 'alive', timestamp: Date.now() });
 });
 
 // Upload document
