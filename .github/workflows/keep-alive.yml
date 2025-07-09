@@ -1,0 +1,16 @@
+name: Keep Render Alive
+
+on:
+  schedule:
+    - cron: '*/14 * * * *'  # Every 14 minutes (fits GitHub free tier)
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render service
+        run: |
+          echo "Pinging Render service..."
+          curl -f https://ambedkar-nodejs.onrender.com/api/health
+          echo "Ping completed"
