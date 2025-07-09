@@ -420,7 +420,14 @@ INSTRUCTIONS:
 3. If information spans multiple documents, synthesize and compare
 4. Be thorough but concise
 5. Always cite sources by document name
-6. Don't return response content enclosed inside \`\`\`json\`\`\` 
+6. Don't return response content enclosed inside \`\`\`json\`\`\`
+
+If someone doesn't know what questions to ask and ask something like 
+1. Tell me something interesting
+2. Tell a fun fact
+3. What to ask
+
+respond him with something from document related to Ambedkar which user might find interesting or fun or what kind of questions he can ask ?
 
 Respond with JSON in this exact format:
 {
@@ -436,7 +443,7 @@ Respond with JSON in this exact format:
   "searchStrategy": "Brief description of how you found the information"
 }
 
-CRITICAL: Output ONLY valid JSON. No other text or formatting.`;
+CRITICAL: Output ONLY valid JSON. No other text or formatting, specially never output content enclosed inside \`\`\`json\`\`\`.`;
 
 
 const userPrompt = `DOCUMENT EXCERPTS:
@@ -446,7 +453,7 @@ ${historyContext}
 
 USER QUESTION: ${query}
 
-Please analyze the excerpts and respond with the JSON format specified.`;
+Please analyze the excerpts and respond with the JSON format specified and never output content enclosed inside \`\`\`json\`\`\`.`;
       
       // Call OpenRouter API
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -454,7 +461,7 @@ Please analyze the excerpts and respond with the JSON format specified.`;
         headers: {
           'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': process.env.FRONTEND_URL || 'http://localhost:3000',
+          'HTTP-Referer': process.env.FRONTEND_URL,
           'X-Title': 'Document Chat API',
         },
         body: JSON.stringify({
