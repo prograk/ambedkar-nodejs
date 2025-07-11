@@ -2,9 +2,7 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
-// import PDFParser from 'pdf2json';
 import { QdrantClient } from '@qdrant/js-client-rest';
-import { pipeline, env } from '@xenova/transformers';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
@@ -81,7 +79,7 @@ const initializeServices = async () => {
     await VectorService.createPayloadIndexes();
     
     // Initialize embedding model
-    await initializeEmbeddingModel();
+    // await initializeEmbeddingModel();
     
     await VectorService.refreshDocumentCache();
 
