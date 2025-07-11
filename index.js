@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
 import { QdrantClient } from '@qdrant/js-client-rest';
+import { pipeline, env } from '@xenova/transformers';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
