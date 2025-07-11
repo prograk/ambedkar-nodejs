@@ -2,6 +2,7 @@
 import express from 'express';
 import cors from 'cors';
 import multer from 'multer';
+// import PDFParser from 'pdf2json';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { pipeline, env } from '@xenova/transformers';
 import { config } from 'dotenv';
@@ -51,13 +52,16 @@ const QDRANT_CONFIG = {
 const CHUNK_CONFIG = {
   chunkSize: 1000,
   chunkOverlap: 200,
-  maxChunks: 100 // Prevent abuse
+  maxChunks: 100, // Prevent abuse
+  separators: ["\n\n", "\n", "।", ".", "?", "!"],
 };
 
 // Global instances
 let qdrantClient = null;
 let embeddingModel = null;
 let isModelLoading = false;
+let documentCache = [];
+let cacheLastUpdated = null;
 
 // Initialize services
 const initializeServices = async () => {
@@ -73,10 +77,14 @@ const initializeServices = async () => {
     });
     
     console.log('✅ Qdrant client initialized');
+
+    await VectorService.createPayloadIndexes();
     
     // Initialize embedding model
     await initializeEmbeddingModel();
     
+    await VectorService.refreshDocumentCache();
+
     return true;
   } catch (error) {
     console.error('❌ Service initialization failed:', error);
@@ -102,7 +110,7 @@ const initializeEmbeddingModel = async () => {
     env.allowRemoteModels = true;
     env.cacheDir = './models';
     
-    embeddingModel = await pipeline('feature-extraction', 'Xenova/all-MiniLM-L6-v2', {
+    embeddingModel = await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', {
       dtype: 'fp32',
       device: 'cpu'
     });
@@ -122,21 +130,57 @@ class DocumentService {
   // Extract text from PDF buffer
   static async extractTextFromPDF(buffer, filename) {
     try {
-      // const data = await pdf(buffer);
-      
-      if (!data.text || data.text.trim().length === 0) {
-        throw new Error('PDF contains no extractable text');
-      }
-      
-      return {
-        text: data.text,
-        pages: data.numpages,
-        metadata: {
-          filename,
-          extractedAt: new Date().toISOString(),
-          characterCount: data.text.length
-        }
-      };
+      // return new Promise((resolve, reject) => {
+      //   const pdfParser = new PDFParser();
+        
+      //   pdfParser.on('pdfParser_dataError', (errData) => {
+      //     reject(new Error(`PDF parsing error: ${errData.parserError}`));
+      //   });
+        
+      //   pdfParser.on('pdfParser_dataReady', (pdfData) => {
+      //     try {
+      //       // Extract text from parsed PDF data
+      //       let text = '';
+            
+      //       if (pdfData.Pages && pdfData.Pages.length > 0) {
+      //         pdfData.Pages.forEach(page => {
+      //           if (page.Texts && page.Texts.length > 0) {
+      //             page.Texts.forEach(textItem => {
+      //               if (textItem.R && textItem.R.length > 0) {
+      //                 textItem.R.forEach(r => {
+      //                   if (r.T) {
+      //                     text += decodeURIComponent(r.T) + ' ';
+      //                   }
+      //                 });
+      //               }
+      //             });
+      //             text += '\n';
+      //           }
+      //         });
+      //       }
+            
+      //       if (!text || text.trim().length === 0) {
+      //         reject(new Error('PDF contains no extractable text'));
+      //         return;
+      //       }
+            
+      //       resolve({
+      //         text: text.trim(),
+      //         pages: pdfData.Pages.length,
+      //         metadata: {
+      //           filename,
+      //           extractedAt: new Date().toISOString(),
+      //           characterCount: text.length
+      //         }
+      //       });
+      //     } catch (parseError) {
+      //       reject(new Error(`Failed to process PDF data: ${parseError.message}`));
+      //     }
+      //   });
+        
+      //   // Parse the PDF buffer
+      //   pdfParser.parseBuffer(buffer);
+      // });
     } catch (error) {
       console.error('PDF extraction failed:', error);
       throw new Error(`Failed to extract text from PDF: ${error.message}`);
@@ -149,7 +193,7 @@ class DocumentService {
       const splitter = new RecursiveCharacterTextSplitter({
         chunkSize: CHUNK_CONFIG.chunkSize,
         chunkOverlap: CHUNK_CONFIG.chunkOverlap,
-        separators: ['\n\n', '\n', '.', '!', '?', ';', ':', ' ', ''],
+        separators: CHUNK_CONFIG.separators,
       });
 
       const chunks = await splitter.splitText(text);
@@ -199,6 +243,14 @@ class DocumentService {
       throw error;
     }
   }
+
+  static getDocumentsFromCache() {
+    return {
+      documents: documentCache,
+      lastUpdated: cacheLastUpdated,
+      count: documentCache.length
+    };
+  };
 }
 
 class EmbeddingService {
@@ -255,6 +307,82 @@ class EmbeddingService {
 }
 
 class VectorService {
+  // Create necessary indexes for efficient filtering
+  static async createPayloadIndexes() {
+    try {
+      if (!qdrantClient) {
+        throw new Error('Qdrant client not initialized');
+      }
+
+      console.log('🔧 Creating payload indexes for efficient filtering...');
+
+      // Create index for document_id (used in delete and document-specific searches)
+      try {
+        await qdrantClient.createPayloadIndex(QDRANT_CONFIG.collectionName, {
+          field_name: 'document_id',
+          field_schema: 'keyword' // Use 'keyword' for exact string matching
+        });
+        console.log('✅ Created index for document_id');
+      } catch (error) {
+        if (error.message.includes('already exists')) {
+          console.log('ℹ️ Index for document_id already exists');
+        } else {
+          console.error('❌ Failed to create document_id index:', error.message);
+        }
+      }
+
+      // Create index for document_name (used in document filtering)
+      try {
+        await qdrantClient.createPayloadIndex(QDRANT_CONFIG.collectionName, {
+          field_name: 'document_name',
+          field_schema: 'keyword'
+        });
+        console.log('✅ Created index for document_name');
+      } catch (error) {
+        if (error.message.includes('already exists')) {
+          console.log('ℹ️ Index for document_name already exists');
+        } else {
+          console.error('❌ Failed to create document_name index:', error.message);
+        }
+      }
+
+      // Create index for uploaded_at (useful for time-based filtering)
+      try {
+        await qdrantClient.createPayloadIndex(QDRANT_CONFIG.collectionName, {
+          field_name: 'uploaded_at',
+          field_schema: 'keyword'
+        });
+        console.log('✅ Created index for uploaded_at');
+      } catch (error) {
+        if (error.message.includes('already exists')) {
+          console.log('ℹ️ Index for uploaded_at already exists');
+        } else {
+          console.error('❌ Failed to create uploaded_at index:', error.message);
+        }
+      }
+
+      console.log('🎉 Payload index creation completed');
+      return true;
+
+    } catch (error) {
+      console.error('❌ Failed to create payload indexes:', error);
+      throw error;
+    }
+  }
+
+  static async refreshDocumentCache() {
+    try {
+      console.log('🔄 Refreshing document cache...');
+      documentCache = await this.getDocumentList();
+      cacheLastUpdated = new Date().toISOString();
+      console.log(`✅ Document cache updated: ${documentCache.length} documents`);
+      return documentCache;
+    } catch (error) {
+      console.error('❌ Failed to refresh document cache:', error);
+      throw error;
+    }
+  };
+
   static async saveDocument(document) {
     try {
       if (!qdrantClient) {
@@ -388,74 +516,30 @@ class VectorService {
   }
 }
 
-class AIService {
-  static async generateResponse(query, historyContext = '') {
+class UtilService {
+  static cleanLLMJson(text) {
+    // Remove ```json or ``` markers
+    let cleaned = text.trim();
+    cleaned = cleaned.replace(/```(json)?/gi, '').replace(/```/g, '').trim();
+
+    return cleaned;
+  }
+
+  static parseLLMJson(text) {
     try {
-      // Search for relevant content
-      const searchResults = await VectorService.searchSimilar(query, 15);
-      
-      if (searchResults.length === 0) {
-        return {
-          answer: "I couldn't find relevant information in your documents to answer this question.",
-          sources: [],
-          relevantSections: '',
-          searchStrategy: '',
-          confidence: "low"
-        };
-      }
-      
-      // Build context from search results
-      const context = searchResults.map((result, index) => 
-        `[${index + 1}] From "${result.payload.document_name}":\n${result.payload.text}`
-      ).join('\n\n');
-      
-      const sources = [...new Set(searchResults.map(r => r.payload.document_name))];
-      
-      // Build prompt
-      const systemPrompt = `You are an expert document analyst with access to relevant document excerpts.
-
-INSTRUCTIONS:
-1. Analyze document excerpts for information relevant to the user's question
-2. Provide comprehensive answers citing source documents
-3. If information spans multiple documents, synthesize and compare
-4. Be thorough but concise
-5. Always cite sources by document name
-6. Don't return response content enclosed inside \`\`\`json\`\`\`
-
-If someone doesn't know what questions to ask and ask something like 
-1. Tell me something interesting
-2. Tell a fun fact
-3. What to ask
-
-respond him with something from document related to Ambedkar which user might find interesting or fun or what kind of questions he can ask ?
-
-Respond with JSON in this exact format:
-{
-  "answer": "Your detailed answer here",
-  "sources": ["document1.pdf", "document2.pdf"],
-  "relevantSections": [
-    {
-      "document": "document1.pdf", 
-      "section": "Brief excerpt of relevant text"
+      const cleaned = this.cleanLLMJson(text);
+      return JSON.parse(cleaned);
+    } catch (error) {
+      console.error('❌ JSON parse error:', error.message);
+      console.error('Text that failed:', text);
+      return null;
     }
-  ],
-  "confidence": "high|medium|low",
-  "searchStrategy": "Brief description of how you found the information"
+  }
 }
 
-CRITICAL: Output ONLY valid JSON. No other text or formatting, specially never output content enclosed inside \`\`\`json\`\`\`.`;
-
-
-const userPrompt = `DOCUMENT EXCERPTS:
-${context}
-
-${historyContext}
-
-USER QUESTION: ${query}
-
-Please analyze the excerpts and respond with the JSON format specified and never output content enclosed inside \`\`\`json\`\`\`.`;
-      
-      // Call OpenRouter API
+class AIService {
+  static async llmCall(messages) {
+    try {
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -466,10 +550,7 @@ Please analyze the excerpts and respond with the JSON format specified and never
         },
         body: JSON.stringify({
           model: process.env.OPENROUTER_MODEL,
-          messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
-          ],
+          messages,
           max_tokens: 1500,
           temperature: 0.1
         })
@@ -481,9 +562,122 @@ Please analyze the excerpts and respond with the JSON format specified and never
 
       const data = await response.json();
       const responseText = data?.choices[0]?.message?.content || '';
+      return responseText;
+    } catch (error) {
+      console.error('OpenRouter API call failed:', error);
+      throw error;
+    }
+  }
+
+  static async summarizeBatch(batchChunks, query) {
+    const batchText = batchChunks
+      .map((r, i) => `[${i+1}] ${r.payload.text}`)
+      .join("\n\n");
+
+    const systemPrompt = `
+  You are an expert summarizer. Your job is to read document excerpts and write a *short, focused summary* of information relevant to answering this question:
+
+  "${query}"
+
+  Ignore unrelated text. Be concise but keep important details.`;
+    
+    const userPrompt = `DOCUMENT EXCERPTS:\n${batchText}`;
+    
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+    
+    return await this.llmCall(messages);
+  }
+
+  static async generateResponse(query, historyContext = '') {
+    try {
+      // Search for relevant content
+      const searchResults = await VectorService.searchSimilar(query, 30);
+
+      if (searchResults.length === 0) {
+        return {
+          answer: "I couldn't find relevant information in your documents to answer this question.",
+          sources: [],
+          relevantSections: '',
+          searchStrategy: '',
+          confidence: "low"
+        };
+      }
+
+      const BATCH_SIZE = 5;
+      const batches = [];
+
+      for (let i = 0; i < searchResults.length; i += BATCH_SIZE) {
+        const batch = searchResults.slice(i, i + BATCH_SIZE);
+        batches.push(batch);
+      }
+
+      const summaries = await Promise.all(batches.map(
+        batch => this.summarizeBatch(batch, query)
+      ));  
+
+      const combinedSummaries = summaries.join("\n\n");
+
+      console.log(combinedSummaries, "combinedSummaries")
+      
+      // Build context from search results
+      const context = searchResults.map((result, index) => 
+        `[${index + 1}] From "${result.payload.document_name}":\n${result.payload.text}`
+      ).join('\n\n');
+      
+      const sources = [...new Set(searchResults.map(r => r.payload.document_name))];
+      
+      // Build prompt
+      const systemPrompt = `
+You are a knowledgeable academic assistant. Your job is to write a comprehensive, well-organized, detailed answer to the question below, using ONLY the provided summaries.
+
+INSTRUCTIONS:
+- Combine all the relevant points
+- Write clearly and thoroughly
+- Organize into logical sections or paragraphs
+- Include important quotes if present
+- Ensure the answer is complete so the user doesn't need to read the documents.
+- Add escape in quote so that JSON can be parsed
+- releventSections max 2 allowed in output
+- Don't include document names in answer
+
+Respond with JSON in this exact format:
+{
+  "answer": "string (MUST be a complete, detailed answer in Markdown format, bullet points, numbered lists, quotes if relevant)",
+  "sources": ["volume1.pdf", "volume2.pdf"],
+  "relevantSections": [
+    { 
+      "documentName": "volume1.pdf", 
+      "section": "Brief 20 words excerpt of relevant text just for refernce purpose, no markdown"
+    }
+  ],
+  "confidence": "high|medium|low",
+  "searchStrategy": "Brief description of how you found the information"
+}`;
+
+// HISTORY CONTEXT: ${historyContext}
+
+const userPrompt = `
+QUESTION: ${query}
+
+DOCUMENT CONTEXT: ${context}
+
+COLLECTED SUMMARIES: ${combinedSummaries}
+`;
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ]
+      
+      // Call OpenRouter API
+      const response = await this.llmCall(messages);
       
       try {
-        const parsedResponse = JSON.parse(responseText);
+        const parsedResponse = UtilService.parseLLMJson(response);
+
         return {
           answer: parsedResponse.answer,
           sources: parsedResponse.sources || sources,
@@ -491,11 +685,11 @@ Please analyze the excerpts and respond with the JSON format specified and never
           searchStrategy: parsedResponse.searchStrategy || '',
           confidence: parsedResponse.confidence || 'medium'
         };
-      // eslint-disable-next-line no-unused-vars
+        // eslint-disable-next-line no-unused-vars
       } catch (parseError) {
         // Fallback if JSON parsing fails
         return {
-          answer: responseText || "I encountered an error processing your question.",
+          answer: "I encountered an error processing your question.",
           sources: sources,
           relevantSections: [],
           searchStrategy: `Analyzed ${searchResults.length} excerpts`,
@@ -504,6 +698,130 @@ Please analyze the excerpts and respond with the JSON format specified and never
       }
     } catch (error) {
       console.error('AI response generation failed:', error);
+      throw error;
+    }
+  }
+}
+
+class SimpleTypeDetector {
+  static detectType(filename, text) {
+    console.log(`🔍 Detecting type for: ${filename}`);
+    
+    // Extract volume number from filename
+    const volumeMatch = filename.match(/Volume[_\s]*(\d+)/i);
+    const volumeNum = volumeMatch ? parseInt(volumeMatch[1]) : 0;
+    
+    // Simple volume-based detection
+    if (volumeNum >= 13) {
+      console.log(`📜 Volume ${volumeNum} = Parliamentary proceedings`);
+      return 'parliamentary';
+    }
+    
+    if (volumeNum === 11) {
+      console.log(`📚 Volume ${volumeNum} = Book (Buddha and His Dhamma)`);
+      return 'book';
+    }
+    
+    if (volumeNum === 12) {
+      console.log(`🎤 Volume ${volumeNum} = Speeches`);
+      return 'speech';
+    }
+    
+    // Quick content check for other volumes
+    const firstPart = text.substring(0, 1000).toLowerCase();
+    
+    if (firstPart.includes('dr. ambedkar:') || firstPart.includes('chairman') || firstPart.includes('assembly')) {
+      console.log(`📜 Content analysis = Parliamentary`);
+      return 'parliamentary';
+    }
+    
+    if (firstPart.includes('chapter') || firstPart.includes('preface') || firstPart.includes('table of contents')) {
+      console.log(`📚 Content analysis = Book`);
+      return 'book';
+    }
+    
+    if (firstPart.includes('delivered at') || firstPart.includes('ladies and gentlemen')) {
+      console.log(`🎤 Content analysis = Speech`);
+      return 'speech';
+    }
+    
+    console.log(`📝 Default = Essay/Article`);
+    return 'essay';
+  }
+}
+
+// Super Simple Chunking Service
+class SimpleChunker {
+  // Just 4 simple configs
+  static CONFIGS = {
+    parliamentary: { size: 512, overlap: 80 },   // Small for speaker turns
+    book: { size: 1000, overlap: 200 },          // Large for complete thoughts
+    speech: { size: 600, overlap: 120 },         // Medium for flow
+    essay: { size: 800, overlap: 160 }           // Medium-large for arguments
+  };
+
+  static async chunkText(text, documentType) {
+    const config = this.CONFIGS[documentType] || this.CONFIGS.essay;
+    
+    console.log(`⚙️ Chunking as ${documentType}: ${config.size} tokens, ${config.overlap} overlap`);
+    
+    const splitter = new RecursiveCharacterTextSplitter({
+      chunkSize: config.size,
+      chunkOverlap: config.overlap,
+      separators: ['\n\n', '\n', '. ', '! ', '? ', '; ', ': ', ' ', '']
+    });
+
+    const chunks = await splitter.splitText(text);
+    const validChunks = chunks.filter(chunk => chunk.trim().length > 10);
+    
+    console.log(`✂️ Created ${validChunks.length} chunks`);
+    return validChunks;
+  }
+}
+
+// Enhanced DocumentService (SIMPLE VERSION)
+class EnhancedDocumentService {
+  // Super simple processing
+  static async processDocument(buffer, filename) {
+    try {
+      console.log(`📄 Processing: ${filename}`);
+      
+      // 1. Extract text
+      const extraction = await DocumentService.extractTextFromPDF(buffer, filename);
+      
+      // 2. Detect type (super simple)
+      const documentType = SimpleTypeDetector.detectType(filename, extraction.text);
+
+      console.log(`📄 Detected type: ${documentType}`);
+      
+      // 3. Smart chunking
+      const chunks = await SimpleChunker.chunkText(extraction.text, documentType);
+      
+      // 4. Build document (same format as before)
+      const document = {
+        id: crypto.randomUUID(),
+        name: filename,
+        status: 'processed',
+        uploadedAt: new Date().toISOString(),
+        documentType: documentType, // NEW: Document type
+        metadata: {
+          ...extraction.metadata,
+          chunkCount: chunks.length,
+          processingMethod: `Smart chunking (${documentType})`,
+          chunkingStrategy: {
+            type: documentType,
+            chunkSize: SimpleChunker.CONFIGS[documentType]?.size || 800,
+            overlap: SimpleChunker.CONFIGS[documentType]?.overlap || 160
+          }
+        },
+        chunks
+      };
+      
+      console.log(`✅ Processed: ${chunks.length} chunks (${documentType})`);
+      return document;
+      
+    } catch (error) {
+      console.error(`❌ Processing failed for ${filename}:`, error);
       throw error;
     }
   }
@@ -559,7 +877,7 @@ app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
     }
     
     // Process document completely on backend
-    const document = await DocumentService.processDocument(req.file.buffer, req.file.originalname);
+    const document = await EnhancedDocumentService.processDocument(req.file.buffer, req.file.originalname);
     
     // Save to vector store
     await VectorService.saveDocument(document);
@@ -583,13 +901,28 @@ app.post('/api/documents/upload', upload.single('file'), async (req, res) => {
   }
 });
 
-// Get document list  
+// Get document list from cache
 app.get('/api/documents', async (req, res) => {
   try {
-    const documents = await VectorService.getDocumentList();
-    res.json({ documents });
+    const cachedData = DocumentService.getDocumentsFromCache();
+    res.json({ documents: cachedData.documents || [] });
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Get latest document list 
+app.post('/api/documents/refresh', async (req, res) => {
+  try {
+    const documents = await VectorService.refreshDocumentCache();
+    res.json({ 
+      success: true, 
+      message: 'Document cache refreshed',
+      count: documents.length,
+      lastUpdated: cacheLastUpdated
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
@@ -630,7 +963,7 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   try {
     console.log('🚀 Starting server...');
-    
+
     await initializeServices();
     
     app.listen(PORT, '0.0.0.0', () => {
