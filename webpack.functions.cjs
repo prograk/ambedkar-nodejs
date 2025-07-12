@@ -6,19 +6,18 @@ module.exports = {
     rules: [
       {
         test: /\.m?js$/,
-        // Only transpile @xenova and @huggingface modules (modern ESM)
-        include: [
-          path.resolve(__dirname, 'functions'),
-          path.resolve(__dirname, 'node_modules/@xenova'),
-          path.resolve(__dirname, 'node_modules/@huggingface'),
-        ],
+        exclude: (modulePath) => {
+          return /node_modules/.test(modulePath) &&
+                 !/node_modules\/(@xenova|@huggingface|@langchain|@qdrant)/.test(modulePath);
+        },
         use: {
           loader: 'babel-loader',
           options: {
-            presets: [
-              ['@babel/preset-env']
+            presets: ['@babel/preset-env'],
+            plugins: [
+              '@babel/plugin-proposal-optional-chaining',
+              '@babel/plugin-proposal-nullish-coalescing-operator',
             ],
-            plugins: ['@babel/plugin-proposal-optional-chaining', '@babel/plugin-proposal-nullish-coalescing-operator'],
           },
         },
       },
