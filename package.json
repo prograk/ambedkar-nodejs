@@ -7,7 +7,7 @@
   "scripts": {
     "start": "nodemon index.js",
     "dev": "nodemon index.js",
-    "build": "netlify-lambda build functions dist-functions --config ./webpack.functions.js",
+    "build": "netlify-lambda build functions dist-functions --config webpack.functions.cjs",
     "deploy": "netlify deploy",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
