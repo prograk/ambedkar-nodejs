@@ -2,4 +2,4 @@
   command = "yarn build"
   publish = "dist"
   functions = "dist-functions"
-  environment = { NODE_ENV = "production", NETLIFY_USE_CACHE = "false", NODE_VERSION = "22.17.0" }
+  environment = { NODE_ENV = "production", NETLIFY_USE_CACHE = "false", NODE_VERSION = "22.6.0" }
