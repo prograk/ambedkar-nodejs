@@ -7,7 +7,8 @@
   "scripts": {
     "start": "nodemon index.js",
     "dev": "nodemon index.js",
-    "build": "netlify-lambda build functions --output dist-functions",
+    "build": "netlify-lambda build functions dist-functions",
+    "deploy": "netlify deploy",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
