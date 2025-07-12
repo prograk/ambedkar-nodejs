@@ -5,5 +5,5 @@
   environment = { 
 		NODE_ENV = "production", 
 		NETLIFY_USE_CACHE = "false", 
-		NODE_VERSION = 18
+		NODE_VERSION = "18"
 	}
