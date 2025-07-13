@@ -115,7 +115,7 @@ const initializeEmbeddingModel = async () => {
     env.cacheDir = './models';
     
     embeddingModel = await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', {
-      dtype: 'fp16',
+      dtype: 'fp32',
       device: 'cpu',
       quantized: true // Use quantized model to reduce memory
     });
@@ -149,57 +149,57 @@ class DocumentService {
   // Extract text from PDF buffer
   static async extractTextFromPDF(buffer, filename) {
     try {
-      // return new Promise((resolve, reject) => {
-      //   const pdfParser = new PDFParser();
+      return new Promise((resolve, reject) => {
+        const pdfParser = new PDFParser();
         
-      //   pdfParser.on('pdfParser_dataError', (errData) => {
-      //     reject(new Error(`PDF parsing error: ${errData.parserError}`));
-      //   });
+        pdfParser.on('pdfParser_dataError', (errData) => {
+          reject(new Error(`PDF parsing error: ${errData.parserError}`));
+        });
         
-      //   pdfParser.on('pdfParser_dataReady', (pdfData) => {
-      //     try {
-      //       // Extract text from parsed PDF data
-      //       let text = '';
+        pdfParser.on('pdfParser_dataReady', (pdfData) => {
+          try {
+            // Extract text from parsed PDF data
+            let text = '';
             
-      //       if (pdfData.Pages && pdfData.Pages.length > 0) {
-      //         pdfData.Pages.forEach(page => {
-      //           if (page.Texts && page.Texts.length > 0) {
-      //             page.Texts.forEach(textItem => {
-      //               if (textItem.R && textItem.R.length > 0) {
-      //                 textItem.R.forEach(r => {
-      //                   if (r.T) {
-      //                     text += decodeURIComponent(r.T) + ' ';
-      //                   }
-      //                 });
-      //               }
-      //             });
-      //             text += '\n';
-      //           }
-      //         });
-      //       }
+            if (pdfData.Pages && pdfData.Pages.length > 0) {
+              pdfData.Pages.forEach(page => {
+                if (page.Texts && page.Texts.length > 0) {
+                  page.Texts.forEach(textItem => {
+                    if (textItem.R && textItem.R.length > 0) {
+                      textItem.R.forEach(r => {
+                        if (r.T) {
+                          text += decodeURIComponent(r.T) + ' ';
+                        }
+                      });
+                    }
+                  });
+                  text += '\n';
+                }
+              });
+            }
             
-      //       if (!text || text.trim().length === 0) {
-      //         reject(new Error('PDF contains no extractable text'));
-      //         return;
-      //       }
+            if (!text || text.trim().length === 0) {
+              reject(new Error('PDF contains no extractable text'));
+              return;
+            }
             
-      //       resolve({
-      //         text: text.trim(),
-      //         pages: pdfData.Pages.length,
-      //         metadata: {
-      //           filename,
-      //           extractedAt: new Date().toISOString(),
-      //           characterCount: text.length
-      //         }
-      //       });
-      //     } catch (parseError) {
-      //       reject(new Error(`Failed to process PDF data: ${parseError.message}`));
-      //     }
-      //   });
+            resolve({
+              text: text.trim(),
+              pages: pdfData.Pages.length,
+              metadata: {
+                filename,
+                extractedAt: new Date().toISOString(),
+                characterCount: text.length
+              }
+            });
+          } catch (parseError) {
+            reject(new Error(`Failed to process PDF data: ${parseError.message}`));
+          }
+        });
         
-      //   // Parse the PDF buffer
-      //   pdfParser.parseBuffer(buffer);
-      // });
+        // Parse the PDF buffer
+        pdfParser.parseBuffer(buffer);
+      });
     } catch (error) {
       console.error('PDF extraction failed:', error);
       throw new Error(`Failed to extract text from PDF: ${error.message}`);
