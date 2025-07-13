@@ -13,10 +13,10 @@ config();
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Configure multer for file uploads
+// Configure multer for file uploads with streaming
 const upload = multer({ 
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }, // Reduced to 10MB limit
   fileFilter: (req, file, cb) => {
     if (file.mimetype === 'application/pdf') {
       cb(null, true);
@@ -49,9 +49,9 @@ const QDRANT_CONFIG = {
 };
 
 const CHUNK_CONFIG = {
-  chunkSize: 1000,
-  chunkOverlap: 200,
-  maxChunks: 100, // Prevent abuse
+  chunkSize: 800, // Reduced chunk size
+  chunkOverlap: 100, // Reduced overlap
+  maxChunks: 50, // Reduced max chunks to prevent memory overload
   separators: ["\n\n", "\n", "।", ".", "?", "!"],
 };
 
@@ -61,6 +61,8 @@ let embeddingModel = null;
 let isModelLoading = false;
 let documentCache = [];
 let cacheLastUpdated = null;
+let modelLastUsed = null;
+const MODEL_IDLE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
 // Initialize services
 const initializeServices = async () => {
@@ -79,8 +81,7 @@ const initializeServices = async () => {
 
     await VectorService.createPayloadIndexes();
     
-    // Initialize embedding model
-    await initializeEmbeddingModel();
+    // Don't pre-load embedding model - load on demand
     
     await VectorService.refreshDocumentCache();
 
@@ -92,7 +93,10 @@ const initializeServices = async () => {
 };
 
 const initializeEmbeddingModel = async () => {
-  if (embeddingModel) return embeddingModel;
+  if (embeddingModel) {
+    modelLastUsed = Date.now();
+    return embeddingModel;
+  }
   
   if (isModelLoading) {
     while (isModelLoading) {
@@ -111,10 +115,25 @@ const initializeEmbeddingModel = async () => {
     
     embeddingModel = await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', {
       dtype: 'fp32',
-      device: 'cpu'
+      device: 'cpu',
+      quantized: true // Use quantized model to reduce memory
     });
     
+    modelLastUsed = Date.now();
     console.log('✅ Embedding model loaded');
+    
+    // Set up auto-unload timer
+    setInterval(() => {
+      if (embeddingModel && modelLastUsed && (Date.now() - modelLastUsed) > MODEL_IDLE_TIMEOUT) {
+        console.log('🧹 Unloading idle embedding model to free memory');
+        embeddingModel = null;
+        modelLastUsed = null;
+        if (global.gc) {
+          global.gc();
+        }
+      }
+    }, 60000); // Check every minute
+    
     return embeddingModel;
   } catch (error) {
     console.error('❌ Failed to load embedding model:', error);
@@ -258,8 +277,8 @@ class EmbeddingService {
       const model = await initializeEmbeddingModel();
       const embeddings = [];
       
-      // Process in small batches
-      const batchSize = 5;
+      // Process in smaller batches to reduce memory
+      const batchSize = 2; // Reduced from 5
       for (let i = 0; i < texts.length; i += batchSize) {
         const batch = texts.slice(i, i + batchSize);
         
@@ -372,7 +391,14 @@ class VectorService {
   static async refreshDocumentCache() {
     try {
       console.log('🔄 Refreshing document cache...');
-      documentCache = await this.getDocumentList();
+      // Only cache essential metadata, not full documents
+      const documents = await this.getDocumentList();
+      documentCache = documents.map(doc => ({
+        id: doc.id,
+        name: doc.name,
+        uploadedAt: doc.uploadedAt,
+        chunkCount: doc.chunkCount
+      }));
       cacheLastUpdated = new Date().toISOString();
       console.log(`✅ Document cache updated: ${documentCache.length} documents`);
       return documentCache;
@@ -407,8 +433,8 @@ class VectorService {
         }
       }));
       
-      // Upload in batches
-      const batchSize = 100;
+      // Upload in smaller batches to reduce memory
+      const batchSize = 20; // Reduced from 100
       let totalUploaded = 0;
       
       for (let i = 0; i < points.length; i += batchSize) {
@@ -443,9 +469,9 @@ class VectorService {
       // Search vectors
       const searchResult = await qdrantClient.search(QDRANT_CONFIG.collectionName, {
         vector: queryEmbedding[0],
-        limit: limit,
+        limit: Math.min(limit, 10), // Cap search results
         with_payload: true,
-        score_threshold: 0.2
+        score_threshold: 0.3 // Increased threshold to reduce results
       });
       
       return searchResult || [];
@@ -485,8 +511,8 @@ class VectorService {
       }
       
       const scrollResult = await qdrantClient.scroll(QDRANT_CONFIG.collectionName, {
-        limit: 1000,
-        with_payload: true,
+        limit: 100, // Reduced from 1000 to prevent memory spike
+        with_payload: ['document_id', 'document_name', 'uploaded_at'], // Only needed fields
         with_vector: false
       });
       
@@ -536,6 +562,7 @@ class UtilService {
   }
 }
 
+// ENHANCED AIService with streaming support
 class AIService {
   static async llmCall(messages) {
     try {
@@ -568,6 +595,73 @@ class AIService {
     }
   }
 
+  // NEW: Streaming LLM call
+  static async streamingLlmCall(messages, onChunk) {
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': process.env.FRONTEND_URL,
+          'X-Title': 'Document Chat API',
+        },
+        body: JSON.stringify({
+          model: process.env.OPENROUTER_MODEL,
+          messages,
+          max_tokens: 1500,
+          temperature: 0.1,
+          stream: true // Enable streaming
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`OpenRouter API error: ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
+
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.trim()) {
+              if (line.startsWith('data: ')) {
+                const data = line.slice(6);
+                if (data === '[DONE]') continue;
+
+                try {
+                  const parsed = JSON.parse(data);
+                  const content = parsed.choices?.[0]?.delta?.content;
+                  if (content) {
+                    onChunk(content);
+                  }
+                } catch (parseError) {
+                  console.warn('Failed to parse streaming chunk:', data);
+                }
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+    } catch (error) {
+      console.error('Streaming OpenRouter API call failed:', error);
+      throw error;
+    }
+  }
+
   static async summarizeBatch(batchChunks, query) {
     const batchText = batchChunks
       .map((r, i) => `[${i+1}] ${r.payload.text}`)
@@ -590,10 +684,152 @@ class AIService {
     return await this.llmCall(messages);
   }
 
+  // NEW: Streaming response generation
+  static async generateStreamingResponse(query, historyContext = '', onChunk, onComplete) {
+    try {
+      console.log('🔄 Starting streaming response generation...');
+      
+      // Search for relevant content with reduced limit
+      const searchResults = await VectorService.searchSimilar(query, 15); // Reduced from 30
+
+      if (searchResults.length === 0) {
+        // Stream a message first
+        const noResultsMessage = "I couldn't find relevant information in your documents to answer this question.";
+        
+        // Simulate streaming for the no-results message
+        const words = noResultsMessage.split(' ');
+        for (const word of words) {
+          onChunk(word + ' ');
+          await new Promise(resolve => setTimeout(resolve, 100)); // Add slight delay
+        }
+        
+        onComplete({
+          answer: noResultsMessage,
+          sources: [],
+          relevantSections: [],
+          searchStrategy: 'No relevant documents found',
+          confidence: "low"
+        });
+        return;
+      }
+
+      console.log(`📊 Found ${searchResults.length} relevant chunks`);
+
+      const BATCH_SIZE = 5;
+      const batches = [];
+
+      for (let i = 0; i < searchResults.length; i += BATCH_SIZE) {
+        const batch = searchResults.slice(i, i + BATCH_SIZE);
+        batches.push(batch);
+      }
+
+      const summaries = await Promise.all(batches.map(
+        batch => this.summarizeBatch(batch, query)
+      ));  
+
+      const combinedSummaries = summaries.join("\n\n");
+      
+      // Build context from search results
+      const context = searchResults.map((result, index) => 
+        `[${index + 1}] From "${result.payload.document_name}":\n${result.payload.text}`
+      ).join('\n\n');
+      
+      const sources = [...new Set(searchResults.map(r => r.payload.document_name))];
+      
+      console.log(`📚 Sources found: ${sources.join(', ')}`);
+      
+      // Build prompt for streaming
+      const systemPrompt = `
+  You are a knowledgeable academic assistant. Your job is to write a comprehensive, well-organized, detailed answer to the question below, using ONLY the provided summaries.
+
+  INSTRUCTIONS:
+  - Write in clear, flowing prose (not JSON)
+  - Combine all the relevant points
+  - Write clearly and thoroughly
+  - Organize into logical sections or paragraphs
+  - Include important quotes if present
+  - Ensure the answer is complete
+  - Don't include document names in answer
+
+  Write your response directly as text, not as JSON.`;
+
+  const userPrompt = `
+  QUESTION: ${query}
+
+  DOCUMENT CONTEXT: ${context}
+
+  COLLECTED SUMMARIES: ${combinedSummaries}
+  `;
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ];
+      
+      let fullAnswer = '';
+      
+      // Stream the response
+      await this.streamingLlmCall(messages, (chunk) => {
+        fullAnswer += chunk;
+        onChunk(chunk);
+      });
+      
+      console.log(`📝 Streaming completed. Full answer length: ${fullAnswer.length}`);
+      
+      // Prepare comprehensive metadata
+      const metadata = {
+        answer: fullAnswer,
+        sources: sources,
+        relevantSections: this.extractRelevantSections(searchResults),
+        searchStrategy: `Analyzed ${searchResults.length} excerpts from ${sources.length} documents using streaming AI`,
+        confidence: this.assessConfidence(searchResults, query)
+      };
+      
+      console.log('📋 Final metadata prepared:', {
+        sourcesCount: metadata.sources.length,
+        relevantSectionsCount: metadata.relevantSections.length,
+        confidence: metadata.confidence,
+        answerLength: metadata.answer.length
+      });
+      
+      // When streaming is complete, call onComplete with metadata
+      onComplete(metadata);
+      
+    } catch (error) {
+      console.error('Streaming response generation failed:', error);
+      
+      // Send error through streaming
+      onChunk('\n\n[Error occurred during streaming]');
+      onComplete({
+        answer: 'An error occurred while generating the response.',
+        sources: [],
+        relevantSections: [],
+        searchStrategy: 'Error during processing',
+        confidence: 'low'
+      });
+    }
+  }
+
+  // Helper methods
+  static extractRelevantSections(searchResults) {
+    return searchResults.slice(0, 2).map(result => ({
+      documentName: result.payload.document_name,
+      section: result.payload.text.substring(0, 100) + "..."
+    }));
+  }
+
+  static assessConfidence(searchResults, query) {
+    if (searchResults.length === 0) return 'low';
+    if (searchResults.length >= 10 && searchResults[0].score > 0.8) return 'high';
+    if (searchResults.length >= 5) return 'medium';
+    return 'low';
+  }
+
+  // Your existing generateResponse method for fallback
   static async generateResponse(query, historyContext = '') {
     try {
-      // Search for relevant content
-      const searchResults = await VectorService.searchSimilar(query, 30);
+      // Search for relevant content with reduced limit
+      const searchResults = await VectorService.searchSimilar(query, 15); // Reduced from 30
 
       if (searchResults.length === 0) {
         return {
@@ -804,7 +1040,7 @@ class EnhancedDocumentService {
       
       // 4. Build document (same format as before)
       const document = {
-        id: crypto.randomUUID(),
+        id: randomUUID(),
         name: filename,
         status: 'processed',
         uploadedAt: new Date().toISOString(),
@@ -941,7 +1177,84 @@ app.delete('/api/documents/:id', async (req, res) => {
   }
 });
 
-// Chat endpoint
+// NEW: Streaming chat endpoint
+app.post('/api/chat/stream', async (req, res) => {
+  try {
+    const { query, historyContext = '' } = req.body;
+    
+    if (!query) {
+      return res.status(400).json({ error: 'Query is required' });
+    }
+
+    console.log('🔄 Starting streaming chat for query:', query.substring(0, 100) + '...');
+
+    // Set headers for Server-Sent Events
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Cache-Control');
+
+    let hasStarted = false;
+    let streamedContent = '';
+
+    // Handle streaming chunks
+    const onChunk = (chunk) => {
+      if (!hasStarted) {
+        hasStarted = true;
+        console.log('📡 Starting to stream response...');
+      }
+      
+      streamedContent += chunk; // Keep track of streamed content
+      
+      const data = {
+        type: 'chunk',
+        content: chunk
+      };
+      
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Handle completion
+    const onComplete = (metadata) => {
+      console.log('✅ Streaming completed, sending metadata...');
+      console.log('📦 Final metadata:', metadata);
+      
+      // Send completion data with all metadata
+      const completionData = {
+        type: 'complete',
+        sources: metadata.sources || [],
+        confidence: metadata.confidence || 'medium',
+        relevantSections: metadata.relevantSections || [],
+        searchStrategy: metadata.searchStrategy || `Analyzed streaming response for: ${query.substring(0, 50)}...`
+      };
+      
+      console.log('📤 Sending completion data:', completionData);
+      res.write(`data: ${JSON.stringify(completionData)}\n\n`);
+      
+      // Send done signal
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+
+    // Start streaming
+    await AIService.generateStreamingResponse(query, historyContext, onChunk, onComplete);
+
+  } catch (error) {
+    console.error('💥 Streaming chat failed:', error);
+    
+    const errorData = {
+      type: 'error',
+      error: error.message
+    };
+    
+    res.write(`data: ${JSON.stringify(errorData)}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
+});
+
+// Regular chat endpoint (fallback)
 app.post('/api/chat', async (req, res) => {
   try {
     const { query, historyContext = '' } = req.body;
@@ -968,11 +1281,23 @@ app.use((err, req, res, next) => {
 const startServer = async () => {
   try {
     console.log('🚀 Starting server...');
+    
+    // Enable manual garbage collection
+    if (global.gc) {
+      console.log('♿️ Garbage collection enabled');
+      setInterval(() => {
+        global.gc();
+        const memUsage = process.memoryUsage();
+        console.log(`📏 Memory: RSS ${Math.round(memUsage.rss / 1024 / 1024)}MB, Heap ${Math.round(memUsage.heapUsed / 1024 / 1024)}MB`);
+      }, 60000); // Log memory every minute
+    }
 
     await initializeServices();
     
     app.listen(PORT, '0.0.0.0', () => {
       console.log(`✅ Server running on port ${PORT}`);
+      console.log(`📡 Streaming endpoint available at /api/chat/stream`);
+      console.log(`💾 Memory optimized for 512MB limit`);
     });
   } catch (error) {
     console.error('💥 Failed to start server:', error);
