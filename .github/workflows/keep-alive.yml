@@ -12,5 +12,5 @@ jobs:
       - name: Ping Render service
         run: |
           echo "Pinging Render service..."
-          curl -f https://ambedkar-nodejs.onrender.com/api/ping
+          curl -f https://ambedkar-nodejs-production.up.railway.app/api/ping
           echo "Ping completed"
