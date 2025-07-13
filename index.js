@@ -1099,7 +1099,7 @@ app.get('/api/config', async (req, res) => {
     res.json({ 
       success: true, 
       config: {
-        isUploadEnabled: process.env.UPLOAD_ENABLED || false
+        isUploadEnabled: process.env.UPLOAD_ENABLED === 'true'
       }
     });
   } catch (error) {
