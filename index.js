@@ -82,6 +82,7 @@ const initializeServices = async () => {
     await VectorService.createPayloadIndexes();
     
     // Don't pre-load embedding model - load on demand
+    await initializeEmbeddingModel();
     
     await VectorService.refreshDocumentCache();
 
@@ -114,7 +115,7 @@ const initializeEmbeddingModel = async () => {
     env.cacheDir = './models';
     
     embeddingModel = await pipeline('feature-extraction', 'Xenova/paraphrase-multilingual-MiniLM-L12-v2', {
-      dtype: 'fp32',
+      dtype: 'fp16',
       device: 'cpu',
       quantized: true // Use quantized model to reduce memory
     });
