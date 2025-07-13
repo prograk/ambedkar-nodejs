@@ -80,7 +80,7 @@ const initializeServices = async () => {
     await VectorService.createPayloadIndexes();
     
     // Initialize embedding model
-    // await initializeEmbeddingModel();
+    await initializeEmbeddingModel();
     
     await VectorService.refreshDocumentCache();
 
@@ -641,6 +641,12 @@ INSTRUCTIONS:
 - Add escape in quote so that JSON can be parsed
 - releventSections max 2 allowed in output
 - Don't include document names in answer
+
+CRITICAL JSON FORMATTING REQUIREMENTS (READ THIS FIRST):
+- Your response MUST be valid JSON only
+- ALWAYS escape quotes inside strings using \"
+- NEVER include unescaped quotes like "word" - use \"word\" instead
+- Test example: "answer": "He said \"I believe\" in his speech"
 
 Respond with JSON in this exact format:
 {
