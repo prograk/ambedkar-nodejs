@@ -6,6 +6,7 @@ import { QdrantClient } from '@qdrant/js-client-rest';
 import { pipeline, env } from '@xenova/transformers';
 import { config } from 'dotenv';
 import { randomUUID } from 'crypto';
+import { encoding_for_model } from 'tiktoken';
 import { RecursiveCharacterTextSplitter } from '@langchain/textsplitters';
 
 config();
@@ -563,8 +564,147 @@ class UtilService {
   }
 }
 
+// Token estimation utilities
+class TokenEstimator {
+  static encoderCache = new Map();
+  
+  static getEncoder(model = 'gpt-4') {
+    // Cache encoders to avoid repeated initialization
+    if (this.encoderCache.has(model)) {
+      return this.encoderCache.get(model);
+    }
+    
+    let encoder;
+    try {
+      // Map your OpenRouter model to tiktoken model
+      if (model.includes('gpt-4')) {
+        encoder = encoding_for_model('gpt-4');
+      } else if (model.includes('gpt-3.5')) {
+        encoder = encoding_for_model('gpt-3.5-turbo');
+      } else {
+        // Default to gpt-4 for unknown models
+        encoder = encoding_for_model('gpt-4');
+      }
+      
+      this.encoderCache.set(model, encoder);
+      return encoder;
+    } catch (error) {
+      console.warn('Failed to get tiktoken encoder, falling back to estimation:', error);
+      return null;
+    }
+  }
+
+  // Accurate token counting using tiktoken
+  static estimateTokens(text, model = process.env.OPENROUTER_MODEL) {
+    if (!text || typeof text !== 'string') return 0;
+    
+    const encoder = this.getEncoder(model);
+    if (!encoder) {
+      // Fallback to your current estimation
+      return Math.ceil(text.length / 4);
+    }
+    
+    try {
+      const tokens = encoder.encode(text);
+      return tokens.length;
+    } catch (error) {
+      console.warn('Token encoding failed, using fallback:', error);
+      return Math.ceil(text.length / 4);
+    }
+  }
+
+  // Accurate truncation using tiktoken
+  static truncateToTokenLimit(text, maxTokens, model = process.env.OPENROUTER_MODEL) {
+    if (!text) return '';
+    
+    const encoder = this.getEncoder(model);
+    if (!encoder) {
+      // Fallback to your current method
+      const estimatedTokens = this.estimateTokens(text);
+      if (estimatedTokens <= maxTokens) return text;
+      const maxChars = maxTokens * 4;
+      return text.substring(0, maxChars - 100) + '...';
+    }
+    
+    try {
+      const tokens = encoder.encode(text);
+      if (tokens.length <= maxTokens) return text;
+      
+      const truncatedTokens = tokens.slice(0, maxTokens);
+      return encoder.decode(truncatedTokens);
+    } catch (error) {
+      console.warn('Token truncation failed, using fallback:', error);
+      const maxChars = maxTokens * 4;
+      return text.substring(0, maxChars - 100) + '...';
+    }
+  }
+
+  // Enhanced context building with accurate token counting
+  static buildContextWithTokenLimit(searchResults, maxTokens, model = process.env.OPENROUTER_MODEL) {
+    let context = '';
+    let currentTokens = 0;
+    const usedResults = [];
+
+    for (const result of searchResults) {
+      const chunk = `[${usedResults.length + 1}] From "${result.payload.document_name}":\n${result.payload.text}\n\n`;
+      const chunkTokens = this.estimateTokens(chunk, model);
+      
+      if (currentTokens + chunkTokens > maxTokens) {
+        break;
+      }
+      
+      context += chunk;
+      currentTokens += chunkTokens;
+      usedResults.push(result);
+    }
+
+    return { context, usedResults, tokenCount: currentTokens };
+  }
+
+  // Count tokens for messages array (useful for API calls)
+  static estimateMessagesTokens(messages, model = process.env.OPENROUTER_MODEL) {
+    let totalTokens = 0;
+    
+    for (const message of messages) {
+      // Add tokens for message structure
+      totalTokens += 4; // Base tokens per message
+      
+      // Add role tokens
+      totalTokens += this.estimateTokens(message.role, model);
+      
+      // Add content tokens
+      totalTokens += this.estimateTokens(message.content, model);
+    }
+    
+    // Add base tokens for completion
+    totalTokens += 2;
+    
+    return totalTokens;
+  }
+
+  // Cleanup method to free encoders (call on server shutdown)
+  static cleanup() {
+    for (const encoder of this.encoderCache.values()) {
+      try {
+        encoder.free();
+      } catch (error) {
+        console.warn('Failed to free encoder:', error);
+      }
+    }
+    this.encoderCache.clear();
+  }
+}
+
 // ENHANCED AIService with streaming support
 class AIService {
+  // Configuration
+  static CONFIG = {
+    MAX_CONTEXT_TOKENS: 8000,    // Reserve tokens for context
+    MAX_RESPONSE_TOKENS: 2000,   // Reserve tokens for response
+    SEARCH_LIMIT: 25,            // Reduced from 30
+    MIN_SCORE_THRESHOLD: 0.3     // Higher threshold for better results
+  };
+
   static async llmCall(messages) {
     try {
       const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -610,7 +750,7 @@ class AIService {
         body: JSON.stringify({
           model: process.env.OPENROUTER_MODEL,
           messages,
-          max_tokens: 1500,
+          max_tokens: this.CONFIG.MAX_RESPONSE_TOKENS,
           temperature: 0.1,
           stream: true // Enable streaming
         })
@@ -685,23 +825,128 @@ class AIService {
     return await this.llmCall(messages);
   }
 
-  // NEW: Streaming response generation
-  static async generateStreamingResponse(query, historyContext = '', onChunk, onComplete) {
+  // SINGLE LLM CALL - Direct approach without batching
+  static async generateResponse(query, historyContext = '') {
     try {
-      console.log('🔄 Starting streaming response generation...');
+      console.log('🔄 Starting optimized response generation...');
       
-      // Search for relevant content with reduced limit
-      const searchResults = await VectorService.searchSimilar(query, 15); // Reduced from 30
+      // 1. Search for relevant content
+      const searchResults = await VectorService.searchSimilar(
+        query, 
+        this.CONFIG.SEARCH_LIMIT
+      );
 
-      if (searchResults.length === 0) {
-        // Stream a message first
+      // Filter by score threshold
+      const filteredResults = searchResults.filter(
+        result => result.score >= this.CONFIG.MIN_SCORE_THRESHOLD
+      );
+
+      if (filteredResults.length === 0) {
+        return {
+          answer: "I couldn't find relevant information in your documents to answer this question.",
+          sources: [],
+          relevantSections: [],
+          searchStrategy: 'No relevant documents found',
+          confidence: "low",
+          tokenUsage: { context: 0, response: 0, total: 0 }
+        };
+      }
+
+      console.log(`📊 Found ${filteredResults.length} relevant chunks (score >= ${this.CONFIG.MIN_SCORE_THRESHOLD})`);
+
+      // 2. Build context with token limits
+      const { context, usedResults, tokenCount } = TokenEstimator.buildContextWithTokenLimit(
+        filteredResults, 
+        this.CONFIG.MAX_CONTEXT_TOKENS
+      );
+
+      const sources = [...new Set(usedResults.map(r => r.payload.document_name))];
+      console.log(`📚 Sources: ${sources.join(', ')}`);
+      console.log(`📏 Context tokens: ${tokenCount}`);
+
+      // 3. Build efficient prompt - SINGLE CALL
+      const systemPrompt = `You are an expert document analyst. Answer the user's question using ONLY the provided document excerpts.
+
+INSTRUCTIONS:
+- Provide a comprehensive, well-organized answer
+- Use information from the excerpts below
+- Organize into logical sections if needed
+- Include relevant quotes when helpful
+- Be thorough but concise
+- Escape quotes properly for JSON
+
+Respond in valid JSON format:
+{
+  "answer": "Complete answer in markdown format",
+  "sources": ["doc1.pdf", "doc2.pdf"],
+  "relevantSections": [
+    {"documentName": "doc1.pdf", "section": "brief relevant excerpt"}
+  ],
+  "confidence": "high|medium|low",
+  "searchStrategy": "brief description"
+}`;
+
+      const userPrompt = `QUESTION: ${query}
+
+DOCUMENT EXCERPTS:
+${context}
+
+${historyContext ? `\nCONVERSATION CONTEXT:\n${historyContext}` : ''}`;
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ];
+
+      // 4. SINGLE LLM CALL
+      const response = await this.llmCall(messages);
+      
+      // 5. Parse and return with token usage
+      const parsedResponse = UtilService.parseLLMJson(response);
+      
+      const tokenUsage = {
+        context: TokenEstimator.estimateTokens(systemPrompt + userPrompt),
+        response: TokenEstimator.estimateTokens(response),
+        total: TokenEstimator.estimateTokens(systemPrompt + userPrompt + response)
+      };
+
+      console.log(`📊 Token usage: ${tokenUsage.total} total (${tokenUsage.context} context + ${tokenUsage.response} response)`);
+
+      return {
+        answer: parsedResponse?.answer || "I encountered an error processing your question.",
+        sources: parsedResponse?.sources || sources,
+        relevantSections: parsedResponse?.relevantSections || [],
+        searchStrategy: parsedResponse?.searchStrategy || `Analyzed ${usedResults.length} excerpts from ${sources.length} documents`,
+        confidence: parsedResponse?.confidence || 'medium',
+        tokenUsage: tokenUsage
+      };
+
+    } catch (error) {
+      console.error('❌ Optimized AI response generation failed:', error);
+      throw error;
+    }
+  }
+
+  // STREAMING VERSION - Also single call
+  static async generateResponseStreaming(query, historyContext = '', onChunk, onComplete) {
+    try {
+      console.log('🔄 Starting optimized streaming response...');
+      
+      // Same search and context building logic
+      const searchResults = await VectorService.searchSimilar(query, this.CONFIG.SEARCH_LIMIT);
+      
+      const filteredResults = searchResults.filter(
+        result => result.score >= this.CONFIG.MIN_SCORE_THRESHOLD
+      );
+
+      if (filteredResults.length === 0) {
         const noResultsMessage = "I couldn't find relevant information in your documents to answer this question.";
         
-        // Simulate streaming for the no-results message
+        // Simulate streaming
         const words = noResultsMessage.split(' ');
         for (const word of words) {
           onChunk(word + ' ');
-          await new Promise(resolve => setTimeout(resolve, 100)); // Add slight delay
+          await new Promise(resolve => setTimeout(resolve, 50));
         }
         
         onComplete({
@@ -709,39 +954,22 @@ class AIService {
           sources: [],
           relevantSections: [],
           searchStrategy: 'No relevant documents found',
-          confidence: "low"
+          confidence: "low",
+          tokenUsage: { context: 0, response: 0, total: 0 }
         });
         return;
       }
 
-      console.log(`📊 Found ${searchResults.length} relevant chunks`);
+      const { context, usedResults, tokenCount } = TokenEstimator.buildContextWithTokenLimit(
+        filteredResults, 
+        this.CONFIG.MAX_CONTEXT_TOKENS
+      );
 
-      const BATCH_SIZE = 5;
-      const batches = [];
-
-      for (let i = 0; i < searchResults.length; i += BATCH_SIZE) {
-        const batch = searchResults.slice(i, i + BATCH_SIZE);
-        batches.push(batch);
-      }
-
-      const summaries = await Promise.all(batches.map(
-        batch => this.summarizeBatch(batch, query)
-      ));  
-
-      const combinedSummaries = summaries.join("\n\n");
+      const sources = [...new Set(usedResults.map(r => r.payload.document_name))];
       
-      // Build context from search results
-      const context = searchResults.map((result, index) => 
-        `[${index + 1}] From "${result.payload.document_name}":\n${result.payload.text}`
-      ).join('\n\n');
-      
-      const sources = [...new Set(searchResults.map(r => r.payload.document_name))];
-      
-      console.log(`📚 Sources found: ${sources.join(', ')}`);
-      
-      // Build prompt for streaming
+      // Build streaming prompt
       const systemPrompt = `
-  You are a knowledgeable academic assistant. Your job is to write a comprehensive, well-organized, detailed answer to the question below, using ONLY the provided summaries.
+       You are a knowledgeable academic assistant. Your job is to write a comprehensive, well-organized, detailed answer to the question below, using ONLY the provided summaries.
 
   INSTRUCTIONS:
   - Write in clear, flowing prose (not JSON)
@@ -754,59 +982,198 @@ class AIService {
 
   Write your response directly as text, not as JSON.`;
 
-  const userPrompt = `
-  QUESTION: ${query}
+      const userPrompt = `QUESTION: ${query}
 
-  DOCUMENT CONTEXT: ${context}
+DOCUMENT EXCERPTS:
+${context}
 
-  COLLECTED SUMMARIES: ${combinedSummaries}
-  `;
+${historyContext ? `\nCONVERSATION CONTEXT:\n${historyContext}` : ''}`;
 
       const messages = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt }
       ];
-      
+
       let fullAnswer = '';
+      let responseTokens = 0;
       
       // Stream the response
       await this.streamingLlmCall(messages, (chunk) => {
         fullAnswer += chunk;
+        responseTokens += TokenEstimator.estimateTokens(chunk);
         onChunk(chunk);
       });
-      
-      console.log(`📝 Streaming completed. Full answer length: ${fullAnswer.length}`);
-      
-      // Prepare comprehensive metadata
-      const metadata = {
+
+      const tokenUsage = {
+        context: TokenEstimator.estimateTokens(systemPrompt + userPrompt),
+        response: responseTokens,
+        total: TokenEstimator.estimateTokens(systemPrompt + userPrompt) + responseTokens
+      };
+
+      console.log(`📊 Streaming token usage: ${tokenUsage.total} total`);
+
+      // Complete with metadata
+      onComplete({
         answer: fullAnswer,
         sources: sources,
-        relevantSections: this.extractRelevantSections(searchResults),
-        searchStrategy: `Analyzed ${searchResults.length} excerpts from ${sources.length} documents using streaming AI`,
-        confidence: this.assessConfidence(searchResults, query)
-      };
-      
-      console.log('📋 Final metadata prepared:', {
-        sourcesCount: metadata.sources.length,
-        relevantSectionsCount: metadata.relevantSections.length,
-        confidence: metadata.confidence,
-        answerLength: metadata.answer.length
+        relevantSections: this.extractRelevantSections(usedResults),
+        searchStrategy: `Analyzed ${usedResults.length} excerpts from ${sources.length} documents`,
+        confidence: this.assessConfidence(filteredResults, query),
+        tokenUsage: tokenUsage
       });
-      
-      // When streaming is complete, call onComplete with metadata
-      onComplete(metadata);
-      
+
     } catch (error) {
-      console.error('Streaming response generation failed:', error);
-      
-      // Send error through streaming
+      console.error('❌ Streaming response generation failed:', error);
       onChunk('\n\n[Error occurred during streaming]');
       onComplete({
         answer: 'An error occurred while generating the response.',
         sources: [],
         relevantSections: [],
         searchStrategy: 'Error during processing',
-        confidence: 'low'
+        confidence: 'low',
+        tokenUsage: { context: 0, response: 0, total: 0 }
+      });
+    }
+  }
+
+  // Streaming-only version of generateResponseWithSmartBatching
+  static async generateResponseWithSmartBatching(query, historyContext = '', onChunk, onComplete) {
+    try {
+      console.log('🔄 Starting smart batched streaming response...');
+      
+      const searchResults = await VectorService.searchSimilar(query, this.CONFIG.SEARCH_LIMIT);
+      
+      if (searchResults.length === 0) {
+        const noResultsMessage = "I couldn't find relevant information in your documents to answer this question.";
+        
+        // Simulate streaming for no results
+        const words = noResultsMessage.split(' ');
+        for (const word of words) {
+          onChunk(word + ' ');
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        
+        onComplete({
+          answer: noResultsMessage,
+          sources: [],
+          relevantSections: [],
+          searchStrategy: 'No relevant documents found',
+          confidence: "low",
+          tokenUsage: { context: 0, response: 0, total: 0 }
+        });
+        return;
+      }
+
+      // Smart batching: only if we have too much content
+      const totalContextTokens = TokenEstimator.estimateTokens(
+        searchResults.map(r => r.payload.text).join('\n')
+      );
+
+      let processedContent;
+      let batchTokens = 0;
+
+      if (totalContextTokens > this.CONFIG.MAX_CONTEXT_TOKENS) {
+        // Content too large - use batching
+        console.log(`📊 Content too large (${totalContextTokens} tokens), using smart batching`);
+        
+        const BATCH_SIZE = 5;
+        const batches = [];
+        
+        for (let i = 0; i < searchResults.length; i += BATCH_SIZE) {
+          batches.push(searchResults.slice(i, i + BATCH_SIZE));
+        }
+        
+        // Limit to 3 batches max to control cost
+        const limitedBatches = batches.slice(0, 3);
+        
+        const summaries = await Promise.all(limitedBatches.map(
+          batch => this.summarizeBatch(batch, query)
+        ));
+
+        processedContent = summaries.join('\n\n');
+        batchTokens = summaries.length * 200; // Estimate batch call tokens
+        
+        console.log(`📊 Created ${summaries.length} summaries from ${limitedBatches.length} batches`);
+      } else {
+        // Use direct content - no batching needed
+        processedContent = searchResults.map((result, index) => 
+          `[${index + 1}] From "${result.payload.document_name}":\n${result.payload.text}`
+        ).join('\n\n');
+        
+        console.log(`📊 Using direct content (${totalContextTokens} tokens)`);
+      }
+
+      // Prepare metadata
+      const sources = [...new Set(searchResults.map(r => r.payload.document_name))];
+      
+      // Single, clean system prompt for streaming
+      const systemPrompt = `You are an expert document analyst. Answer the user's question using the provided content.
+
+  INSTRUCTIONS:
+  - Write a comprehensive, well-organized answer
+  - Use clear, flowing prose
+  - Organize into logical sections or paragraphs  
+  - Include relevant quotes when helpful
+  - Be thorough but concise
+  - Write directly as text, not as JSON
+
+  Write your response as natural text that directly answers the question.`;
+
+      const userPrompt = `QUESTION: ${query}
+
+  CONTENT:
+  ${processedContent}
+
+  ${historyContext ? `\nCONVERSATION CONTEXT:\n${historyContext}` : ''}`;
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ];
+
+      // Stream the response
+      let fullAnswer = '';
+      let responseTokens = 0;
+      
+      await this.streamingLlmCall(messages, (chunk) => {
+        fullAnswer += chunk;
+        responseTokens += TokenEstimator.estimateTokens(chunk);
+        onChunk(chunk);
+      });
+
+      // Calculate token usage
+      const tokenUsage = {
+        context: TokenEstimator.estimateTokens(systemPrompt + userPrompt),
+        response: responseTokens,
+        batching: batchTokens,
+        total: TokenEstimator.estimateTokens(systemPrompt + userPrompt) + responseTokens + batchTokens
+      };
+
+      console.log(`📊 Streaming completed. Token usage: ${tokenUsage.total} total (${tokenUsage.batching} from batching)`);
+
+      // Send completion metadata
+      onComplete({
+        answer: fullAnswer,
+        sources: sources,
+        relevantSections: this.extractRelevantSections(searchResults),
+        searchStrategy: batchTokens > 0 
+          ? `Smart batching: ${searchResults.length} excerpts processed with ${Math.floor(batchTokens/200)} summaries`
+          : `Direct processing: ${searchResults.length} excerpts analyzed`,
+        confidence: this.assessConfidence(searchResults, query),
+        tokenUsage: tokenUsage
+      });
+
+    } catch (error) {
+      console.error('❌ Smart batched streaming failed:', error);
+      
+      onChunk('\n\n[Error occurred during response generation]');
+      onComplete({
+        answer: 'An error occurred while generating the response.',
+        sources: [],
+        relevantSections: [],
+        searchStrategy: 'Error during processing',
+        confidence: 'low',
+        tokenUsage: { context: 0, response: 0, total: 0 }
       });
     }
   }
@@ -819,129 +1186,16 @@ class AIService {
     }));
   }
 
-  static assessConfidence(searchResults, query) {
+  static assessConfidence(searchResults) {
     if (searchResults.length === 0) return 'low';
-    if (searchResults.length >= 10 && searchResults[0].score > 0.8) return 'high';
-    if (searchResults.length >= 5) return 'medium';
+    
+    const avgScore = searchResults.reduce((sum, r) => sum + r.score, 0) / searchResults.length;
+    const highQualityCount = searchResults.filter(r => r.score > 0.6).length;
+    const sourceCount = new Set(searchResults.map(r => r.payload.document_name)).size;
+    
+    if (avgScore > 0.7 && highQualityCount >= 5 && sourceCount >= 2) return 'high';
+    if (avgScore > 0.5 || (highQualityCount >= 3 && sourceCount >= 2)) return 'medium';
     return 'low';
-  }
-
-  // Your existing generateResponse method for fallback
-  static async generateResponse(query, historyContext = '') {
-    try {
-      // Search for relevant content with reduced limit
-      const searchResults = await VectorService.searchSimilar(query, 15); // Reduced from 30
-
-      if (searchResults.length === 0) {
-        return {
-          answer: "I couldn't find relevant information in your documents to answer this question.",
-          sources: [],
-          relevantSections: '',
-          searchStrategy: '',
-          confidence: "low"
-        };
-      }
-
-      const BATCH_SIZE = 5;
-      const batches = [];
-
-      for (let i = 0; i < searchResults.length; i += BATCH_SIZE) {
-        const batch = searchResults.slice(i, i + BATCH_SIZE);
-        batches.push(batch);
-      }
-
-      const summaries = await Promise.all(batches.map(
-        batch => this.summarizeBatch(batch, query)
-      ));  
-
-      const combinedSummaries = summaries.join("\n\n");
-
-      console.log(combinedSummaries, "combinedSummaries")
-      
-      // Build context from search results
-      const context = searchResults.map((result, index) => 
-        `[${index + 1}] From "${result.payload.document_name}":\n${result.payload.text}`
-      ).join('\n\n');
-      
-      const sources = [...new Set(searchResults.map(r => r.payload.document_name))];
-      
-      // Build prompt
-      const systemPrompt = `
-You are a knowledgeable academic assistant. Your job is to write a comprehensive, well-organized, detailed answer to the question below, using ONLY the provided summaries.
-
-INSTRUCTIONS:
-- Combine all the relevant points
-- Write clearly and thoroughly
-- Organize into logical sections or paragraphs
-- Include important quotes if present
-- Ensure the answer is complete so the user doesn't need to read the documents.
-- Add escape in quote so that JSON can be parsed
-- releventSections max 2 allowed in output
-- Don't include document names in answer
-
-CRITICAL JSON FORMATTING REQUIREMENTS (READ THIS FIRST):
-- Your response MUST be valid JSON only
-- ALWAYS escape quotes inside strings using \"
-- NEVER include unescaped quotes like "word" - use \"word\" instead
-- Test example: "answer": "He said \"I believe\" in his speech"
-
-Respond with JSON in this exact format:
-{
-  "answer": "string (MUST be a complete, detailed answer in Markdown format, bullet points, numbered lists, quotes if relevant)",
-  "sources": ["volume1.pdf", "volume2.pdf"],
-  "relevantSections": [
-    { 
-      "documentName": "volume1.pdf", 
-      "section": "Brief 20 words excerpt of relevant text just for refernce purpose, no markdown"
-    }
-  ],
-  "confidence": "high|medium|low",
-  "searchStrategy": "Brief description of how you found the information"
-}`;
-
-// HISTORY CONTEXT: ${historyContext}
-
-const userPrompt = `
-QUESTION: ${query}
-
-DOCUMENT CONTEXT: ${context}
-
-COLLECTED SUMMARIES: ${combinedSummaries}
-`;
-
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ]
-      
-      // Call OpenRouter API
-      const response = await this.llmCall(messages);
-      
-      try {
-        const parsedResponse = UtilService.parseLLMJson(response);
-
-        return {
-          answer: parsedResponse.answer,
-          sources: parsedResponse.sources || sources,
-          relevantSections: parsedResponse.relevantSections || [],
-          searchStrategy: parsedResponse.searchStrategy || '',
-          confidence: parsedResponse.confidence || 'medium'
-        };
-        // eslint-disable-next-line no-unused-vars
-      } catch (parseError) {
-        // Fallback if JSON parsing fails
-        return {
-          answer: "I encountered an error processing your question.",
-          sources: sources,
-          relevantSections: [],
-          searchStrategy: `Analyzed ${searchResults.length} excerpts`,
-          confidence: "low"
-        };
-      }
-    } catch (error) {
-      console.error('AI response generation failed:', error);
-      throw error;
-    }
   }
 }
 
@@ -1227,7 +1481,8 @@ app.post('/api/chat/stream', async (req, res) => {
         sources: metadata.sources || [],
         confidence: metadata.confidence || 'medium',
         relevantSections: metadata.relevantSections || [],
-        searchStrategy: metadata.searchStrategy || `Analyzed streaming response for: ${query.substring(0, 50)}...`
+        searchStrategy: metadata.searchStrategy || `Analyzed streaming response for: ${query.substring(0, 50)}...`,
+        tokenUsage: metadata.tokenUsage || { context: 0, response: 0, total: 0 }
       };
       
       console.log('📤 Sending completion data:', completionData);
@@ -1239,7 +1494,7 @@ app.post('/api/chat/stream', async (req, res) => {
     };
 
     // Start streaming
-    await AIService.generateStreamingResponse(query, historyContext, onChunk, onComplete);
+    await AIService.generateResponseWithSmartBatching(query, historyContext, onChunk, onComplete);
 
   } catch (error) {
     console.error('💥 Streaming chat failed:', error);
