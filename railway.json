@@ -1,0 +1,6 @@
+{
+  "build": {
+    "builder": "nixpacks",
+    "buildCommand": "yarn install --no-frozen-lockfile && yarn build"
+  }
+}
