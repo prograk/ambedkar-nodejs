@@ -1323,6 +1323,436 @@ class EnhancedDocumentService {
   }
 }
 
+class AmbedkarPersonaService {
+  
+  // Enhanced search that maps modern topics to Ambedkar's relevant themes
+  static TOPIC_MAPPINGS = {
+    // Social Issues
+    'social media': ['caste discrimination', 'untouchability', 'social reform', 'public opinion'],
+    'online harassment': ['untouchability', 'social exclusion', 'dignity', 'human rights'],
+    'cancel culture': ['social boycott', 'ostracism', 'freedom of speech'],
+    'influencers': ['leadership', 'social reform', 'education', 'enlightenment'],
+    
+    // Political & Governance
+    'democracy': ['parliamentary democracy', 'constitutional government', 'political participation'],
+    'authoritarianism': ['dictatorship', 'fascism', 'individual liberty', 'constitutional safeguards'],
+    'populism': ['majority rule', 'minority rights', 'constitutional morality'],
+    'corruption': ['governance', 'public service', 'moral degradation'],
+    
+    // Technology & Society
+    'artificial intelligence': ['education', 'knowledge', 'human dignity', 'employment'],
+    'automation': ['labor', 'industrial development', 'unemployment', 'skill development'],
+    'digital divide': ['education inequality', 'access to knowledge', 'social mobility'],
+    
+    // Economic Issues
+    'inequality': ['economic justice', 'wealth distribution', 'labor rights'],
+    'capitalism': ['industrial development', 'labor exploitation', 'economic reform'],
+    'gig economy': ['labor conditions', 'worker rights', 'economic security'],
+    
+    // Social Justice
+    'affirmative action': ['reservation', 'representation', 'compensatory discrimination'],
+    'identity politics': ['caste politics', 'community representation', 'political participation'],
+    'intersectionality': ['multiple identities', 'compound discrimination', 'women rights'],
+    
+    // Religion & Culture
+    'secularism': ['religious freedom', 'separation of religion and state', 'minority rights'],
+    'religious fundamentalism': ['religious fanaticism', 'communalism', 'tolerance'],
+    'cultural appropriation': ['cultural identity', 'respect for traditions', 'dignity']
+  };
+
+  // Core themes that define Ambedkar's worldview
+  static CORE_THEMES = [
+    'constitutional democracy',
+    'social justice',
+    'human dignity',
+    'equality',
+    'education and enlightenment',
+    'religious freedom',
+    'labor rights',
+    'women empowerment',
+    'minority rights',
+    'rule of law'
+  ];
+
+  // Ambedkar's characteristic phrases and concepts
+  static SIGNATURE_CONCEPTS = [
+    'constitutional morality',
+    'educate, agitate, organize',
+    'religion is for man, not man for religion',
+    'political power is the master key',
+    'liberty, equality, fraternity',
+    'annihilation of caste',
+    'separate electorate',
+    'Buddhism as liberation'
+  ];
+
+  // Enhanced search strategy for persona responses
+  static async searchForPersonaContext(query, originalSearchResults) {
+    try {
+      console.log('🔍 Searching for Ambedkar persona context...');
+      
+      // 1. Extract modern topics from query
+      const modernTopics = this.extractModernTopics(query);
+      console.log('🎯 Modern topics detected:', modernTopics);
+      
+      // 2. Map to Ambedkar's historical themes
+      const historicalThemes = this.mapToHistoricalThemes(modernTopics);
+      console.log('📚 Mapped historical themes:', historicalThemes);
+      
+      // 3. Search for additional context if needed
+      let contextResults = [...originalSearchResults];
+      
+      // If we have historical themes, search for them too
+      if (historicalThemes.length > 0) {
+        for (const theme of historicalThemes.slice(0, 3)) { // Limit to avoid too many calls
+          const themeResults = await VectorService.searchSimilar(theme, 5);
+          contextResults.push(...themeResults);
+        }
+      }
+      
+      // 4. Remove duplicates and sort by relevance
+      const uniqueResults = this.deduplicateResults(contextResults);
+      
+      // 5. Prioritize biographical and philosophical content
+      const prioritizedResults = this.prioritizeContent(uniqueResults);
+      
+      console.log(`✅ Enhanced context: ${prioritizedResults.length} results`);
+      return prioritizedResults;
+      
+    } catch (error) {
+      console.error('❌ Persona context search failed:', error);
+      return originalSearchResults; // Fallback to original results
+    }
+  }
+
+  static extractModernTopics(query) {
+    const topics = [];
+    const lowerQuery = query.toLowerCase();
+    
+    for (const [modernTerm, themes] of Object.entries(this.TOPIC_MAPPINGS)) {
+      if (lowerQuery.includes(modernTerm)) {
+        topics.push(modernTerm);
+      }
+    }
+    
+    return topics;
+  }
+
+  static mapToHistoricalThemes(modernTopics) {
+    const themes = new Set();
+    
+    modernTopics.forEach(topic => {
+      const mappedThemes = this.TOPIC_MAPPINGS[topic] || [];
+      mappedThemes.forEach(theme => themes.add(theme));
+    });
+    
+    return Array.from(themes);
+  }
+
+  static deduplicateResults(results) {
+    const seen = new Set();
+    return results.filter(result => {
+      const key = `${result.payload.document_name}-${result.payload.chunk_index}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  static prioritizeContent(results) {
+    // Sort by relevance score first, then prioritize certain document types
+    return results.sort((a, b) => {
+      // Higher score wins
+      if (b.score !== a.score) return b.score - a.score;
+      
+      // Prioritize speeches and parliamentary debates for persona
+      const aIsSpeech = a.payload.document_name.toLowerCase().includes('speech') || 
+                      a.payload.document_name.toLowerCase().includes('volume12');
+      const bIsSpeech = b.payload.document_name.toLowerCase().includes('speech') || 
+                      b.payload.document_name.toLowerCase().includes('volume12');
+      
+      if (aIsSpeech && !bIsSpeech) return -1;
+      if (!aIsSpeech && bIsSpeech) return 1;
+      
+      return 0;
+    });
+  }
+
+  // Generate the persona-specific system prompt
+  static generatePersonaPrompt(query, contextualInfo = '') {
+    const currentYear = new Date().getFullYear();
+    
+    return `You are Dr. Bhimrao Ramji Ambedkar, speaking in ${currentYear}. You have been given the context of modern times and are responding based on your lifelong philosophy, writings, and speeches.
+
+CORE IDENTITY:
+- You are the principal architect of the Indian Constitution
+- Champion of social justice, equality, and human dignity
+- Advocate for the oppressed and marginalized
+- Believer in constitutional democracy and rule of law
+- Convert to Buddhism who saw it as a path to liberation
+- Scholar, lawyer, and social reformer
+
+SPEAKING STYLE AND APPROACH:
+- Give DIRECT answers first, then provide context and nuance
+- Use first person ("I believe", "In my experience", "Yes, this happened to me")
+- Reference your actual works and speeches when relevant
+- Don't deflect or avoid difficult questions
+- Be specific about your experiences when asked directly
+- Then explain the broader principles and implications
+- Use measured, scholarly language but with conviction
+
+ANSWER STRUCTURE:
+1. **Direct Answer**: Start with a clear, specific response to the question
+2. **Personal Experience**: Share relevant personal experiences when applicable
+3. **Broader Context**: Explain the larger social/political implications
+4. **Modern Application**: Connect to current issues and your principles
+
+RESPONSE EXAMPLES:
+- If asked "Were you discriminated against?" → Start with "Yes, I faced severe discrimination throughout my life..."
+- If asked "Do you support reservations?" → Start with "Yes, I believe reservations are necessary..."
+- If asked about specific incidents → Give the specific answer first, then context
+
+CORE PRINCIPLES TO EMBODY:
+1. Constitutional morality and rule of law
+2. Liberty, equality, and fraternity
+3. Education as the tool for liberation
+4. Political power as the master key to progress
+5. Annihilation of caste and social hierarchy
+6. Religious freedom and individual dignity
+7. Labor rights and economic justice
+8. Women's rights and empowerment
+
+CRITICAL: Answer the specific question asked directly and honestly, then provide the deeper analysis. Avoid academic evasion.
+
+${contextualInfo ? `ADDITIONAL CONTEXT: ${contextualInfo}` : ''}
+
+Respond as Dr. Ambedkar would, giving clear answers while maintaining philosophical depth.`;
+  }
+
+  // Enhanced response generation for persona
+  static async generatePersonaResponse(query, historyContext = '', onChunk, onComplete) {
+    try {
+      console.log('🎭 Generating Ambedkar persona response...');
+      
+      // 1. Initial search
+      const searchResults = await VectorService.searchSimilar(query, AIService.CONFIG.SEARCH_LIMIT);
+      
+      if (searchResults.length === 0) {
+        const noResultsMessage = "I apologize, but I cannot find sufficient information in my writings and speeches to address your question adequately. Perhaps you could ask about my documented work on constitutional law, social justice, or religious philosophy?";
+        
+        // Stream the response
+        const words = noResultsMessage.split(' ');
+        for (const word of words) {
+          onChunk(word + ' ');
+          await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        
+        onComplete({
+          answer: noResultsMessage,
+          sources: [],
+          relevantSections: [],
+          searchStrategy: 'Insufficient content in documented works',
+          confidence: 'low',
+          tokenUsage: { context: 0, response: 0, batching: 0, total: 0 },
+          personaType: 'ambedkar'
+        });
+        return;
+      }
+
+      // 2. Enhanced context search for persona
+      const enhancedResults = await this.searchForPersonaContext(query, searchResults);
+      
+      // 3. Filter by score threshold
+      const filteredResults = enhancedResults.filter(
+        result => result.score >= AIService.CONFIG.MIN_SCORE_THRESHOLD
+      );
+
+      // 4. Smart batching logic (similar to original)
+      const totalContextTokens = TokenEstimator.estimateTokens(
+        filteredResults.map(r => r.payload.text).join('\n')
+      );
+
+      let processedContent;
+      let batchTokens = 0;
+
+      if (totalContextTokens > AIService.CONFIG.MAX_CONTEXT_TOKENS) {
+        console.log(`📊 Using smart batching for persona context`);
+        
+        const BATCH_SIZE = 4; // Smaller batches for persona to maintain voice
+        const batches = [];
+        
+        for (let i = 0; i < filteredResults.length; i += BATCH_SIZE) {
+          batches.push(filteredResults.slice(i, i + BATCH_SIZE));
+        }
+        
+        const limitedBatches = batches.slice(0, 3);
+        
+        // Custom summarization for persona
+        const summaries = await Promise.all(limitedBatches.map(
+          batch => this.summarizeForPersona(batch, query)
+        ));
+
+        processedContent = summaries.join('\n\n');
+        batchTokens = summaries.length * 200;
+        
+      } else {
+        // Direct content for persona
+        processedContent = filteredResults.map((result, index) => 
+          `[Excerpt ${index + 1}] From "${result.payload.document_name}":\n${result.payload.text}`
+        ).join('\n\n');
+      }
+
+      // 5. Generate persona-specific prompt
+      const sources = [...new Set(filteredResults.map(r => r.payload.document_name))];
+      const modernContext = this.generateModernContextNote(query);
+      
+      const systemPrompt = this.generatePersonaPrompt(query, modernContext);
+      
+      const userPrompt = `QUESTION: ${query}
+
+MY WRITINGS AND SPEECHES (for reference):
+${processedContent}
+
+${historyContext ? `\nPREVIOUS CONVERSATION:\n${historyContext}` : ''}
+
+Please respond as Dr. Ambedkar, applying your documented philosophy to this modern question.`;
+
+      const messages = [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt }
+      ];
+
+      // 6. Stream the persona response
+      let fullAnswer = '';
+      let responseTokens = 0;
+      
+      await AIService.streamingLlmCall(messages, (chunk) => {
+        fullAnswer += chunk;
+        responseTokens += TokenEstimator.estimateTokens(chunk);
+        onChunk(chunk);
+      });
+
+      // 7. Complete with metadata
+      const tokenUsage = {
+        context: TokenEstimator.estimateTokens(systemPrompt + userPrompt),
+        response: responseTokens,
+        batching: batchTokens,
+        total: TokenEstimator.estimateTokens(systemPrompt + userPrompt) + responseTokens + batchTokens
+      };
+
+      onComplete({
+        answer: fullAnswer,
+        sources: sources,
+        relevantSections: this.extractRelevantSections(filteredResults),
+        searchStrategy: `Persona response based on ${filteredResults.length} excerpts from Ambedkar's works`,
+        confidence: this.assessPersonaConfidence(filteredResults, query),
+        tokenUsage: tokenUsage,
+        personaType: 'ambedkar'
+      });
+
+    } catch (error) {
+      console.error('❌ Persona response generation failed:', error);
+      
+      onChunk('\n\n[I apologize, but I encountered an error while accessing my writings.]');
+      onComplete({
+        answer: 'I apologize, but I encountered an error while formulating my response.',
+        sources: [],
+        relevantSections: [],
+        searchStrategy: 'Error during persona response generation',
+        confidence: 'low',
+        tokenUsage: { context: 0, response: 0, batching: 0, total: 0 },
+        personaType: 'ambedkar'
+      });
+    }
+  }
+
+  // Custom summarization that preserves Ambedkar's voice
+  static async summarizeForPersona(batchChunks, query) {
+    const batchText = batchChunks
+      .map((r, i) => `[${i+1}] ${r.payload.text}`)
+      .join("\n\n");
+
+    const systemPrompt = `You are preparing excerpts from Dr. Ambedkar's writings for him to reference when answering: "${query}"
+
+FOCUS ON:
+- Specific incidents, experiences, or events Ambedkar mentions
+- His direct statements and positions on issues
+- Concrete examples and personal experiences
+- Clear policy positions and recommendations
+- His exact quotes when possible
+
+PRESERVE:
+- Factual details and specific incidents
+- His direct statements and clear positions
+- Personal experiences and anecdotes
+- Specific examples and evidence
+- His reasoning and logical arguments
+
+Extract information that helps him give direct, specific answers rather than just general principles.`;
+    
+    const userPrompt = `EXCERPTS FROM AMBEDKAR'S WRITINGS:\n${batchText}`;
+    
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt }
+    ];
+    
+    return await AIService.llmCall(messages);
+  }
+
+  static generateModernContextNote(query) {
+    const lowerQuery = query.toLowerCase();
+    let contextNotes = [];
+    
+    // Add context about modern technologies/concepts
+    if (lowerQuery.includes('social media') || lowerQuery.includes('internet')) {
+      contextNotes.push('Modern digital platforms for communication and information sharing');
+    }
+    
+    if (lowerQuery.includes('ai') || lowerQuery.includes('artificial intelligence')) {
+      contextNotes.push('Automated systems that can perform tasks requiring human intelligence');
+    }
+    
+    if (lowerQuery.includes('globalization')) {
+      contextNotes.push('Worldwide economic and cultural integration');
+    }
+    
+    return contextNotes.join('. ');
+  }
+
+  static extractRelevantSections(searchResults) {
+    return searchResults.slice(0, 3).map(result => ({
+      documentName: result.payload.document_name,
+      section: result.payload.text.substring(0, 150) + "..."
+    }));
+  }
+
+  static assessPersonaConfidence(searchResults, query) {
+    if (searchResults.length === 0) return 'low';
+    
+    // Check if we have results from multiple types of documents
+    const docTypes = new Set();
+    searchResults.forEach(result => {
+      const docName = result.payload.document_name.toLowerCase();
+      if (docName.includes('speech') || docName.includes('volume12')) docTypes.add('speeches');
+      if (docName.includes('volume11')) docTypes.add('books');
+      if (docName.includes('parliament') || docName.match(/volume1[3-9]/)) docTypes.add('parliamentary');
+      else docTypes.add('writings');
+    });
+    
+    const avgScore = searchResults.reduce((sum, r) => sum + r.score, 0) / searchResults.length;
+    const highQualityCount = searchResults.filter(r => r.score > 0.6).length;
+    
+    // High confidence: Good scores + multiple document types + sufficient results
+    if (avgScore > 0.65 && highQualityCount >= 4 && docTypes.size >= 2) return 'high';
+    
+    // Medium confidence: Decent coverage
+    if (avgScore > 0.5 && highQualityCount >= 2) return 'medium';
+    
+    return 'low';
+  }
+}
+
 // API Routes
 
 // Health check
@@ -1429,6 +1859,79 @@ app.delete('/api/documents/:id', async (req, res) => {
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Ambedkar Persona Streaming Chat Endpoint
+app.post('/api/chat/ambedkar', async (req, res) => {
+  try {
+    const { query, historyContext = '' } = req.body;
+    
+    if (!query) {
+      return res.status(400).json({ error: 'Query is required' });
+    }
+
+    console.log('🎭 Starting Ambedkar persona chat for query:', query.substring(0, 100) + '...');
+
+    // Set headers for Server-Sent Events
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Cache-Control');
+
+    let hasStarted = false;
+
+    // Handle streaming chunks
+    const onChunk = (chunk) => {
+      if (!hasStarted) {
+        hasStarted = true;
+        console.log('🎭 Ambedkar persona streaming started...');
+      }
+      
+      const data = {
+        type: 'chunk',
+        content: chunk,
+        persona: 'ambedkar'
+      };
+      
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // Handle completion
+    const onComplete = (metadata) => {
+      console.log('✅ Ambedkar persona response completed');
+      
+      const completionData = {
+        type: 'complete',
+        sources: metadata.sources || [],
+        confidence: metadata.confidence || 'medium',
+        relevantSections: metadata.relevantSections || [],
+        searchStrategy: metadata.searchStrategy || 'Ambedkar persona response',
+        tokenUsage: metadata.tokenUsage || { context: 0, response: 0, batching: 0, total: 0 },
+        personaType: 'ambedkar'
+      };
+      
+      res.write(`data: ${JSON.stringify(completionData)}\n\n`);
+      res.write('data: [DONE]\n\n');
+      res.end();
+    };
+
+    // Generate persona response
+    await AmbedkarPersonaService.generatePersonaResponse(query, historyContext, onChunk, onComplete);
+
+  } catch (error) {
+    console.error('💥 Ambedkar persona chat failed:', error);
+    
+    const errorData = {
+      type: 'error',
+      error: error.message,
+      persona: 'ambedkar'
+    };
+    
+    res.write(`data: ${JSON.stringify(errorData)}\n\n`);
+    res.write('data: [DONE]\n\n');
+    res.end();
   }
 });
 
